@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="用现象、证据、处理和验证组织排查笔记，让别人能复查并复用。">
+  <title>把排查过程写成可复用的笔记 · Rookie 的笔记</title>
+  <link rel="stylesheet" href="../assets/notes.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到正文</a>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <a class="brand" href="../index.html"><span class="brand-mark" aria-hidden="true"></span><span>Rookie 的笔记</span></a>
+      <nav class="topnav" aria-label="主导航">
+        <a href="../index.html#notes">笔记</a>
+        <a href="https://github.com/rookiefyy/rookiefyy.github.io">GitHub</a>
+      </nav>
+    </div>
+  </header>
+  <main class="shell" id="main-content">
+    <article class="article">
+      <header class="article-header">
+        <div class="article-meta">
+          <span class="topic-label">写作方法</span>
+          <time datetime="2026-11-16">2026.11.16</time>
+          <span class="article-example">示例笔记</span>
+        </div>
+        <h1>把排查过程写成可复用的笔记</h1>
+        <p class="article-intro">把排查写给下次遇到同类问题的人。读者需要知道问题在哪些条件下出现、如何定位，以及怎样判断处理已经生效。</p>
+      </header>
+      <div class="article-body">
+        <h2>从可以重现的现象开始</h2>
+        <p>写下最短的触发步骤和能观察到的结果。比如「打开笔记列表后选择开发工具，列表为空」，这句话给出了入口、动作和结果，便于读者判断自己遇到的是不是同一个问题。</p>
+        <h2>把证据和推测写清楚</h2>
+        <p>保留足以支撑判断的观察结果。如果刷新后筛选恢复，可以记下两次操作的差异，再把对状态初始化的怀疑标为待查。等找到对应代码或通过一次小实验，再补上结论。</p>
+        <h2>记录别人能重复的验证</h2>
+        <ol>
+          <li>写下改动发生的位置，以及它如何对应已经确认的问题。</li>
+          <li>再走一遍原来的触发步骤，记下预期和实际结果。</li>
+          <li>补一条正常路径的检查，例如切换到另一个主题仍能看到笔记。</li>
+        </ol>
+        <p>整理完后，从头读一遍。如果隔几周再看仍能重现现象、找到处理位置并复查结果，这份笔记就保留了足够的上下文。</p>
+      </div>
+      <div class="article-return"><a href="../index.html#notes">返回笔记列表</a></div>
+    </article>
+  </main>
+  <footer class="site-footer">
+    <div class="shell footer-inner"><span>Rookie 的笔记</span><a href="https://github.com/rookiefyy/rookiefyy.github.io">GitHub</a></div>
+  </footer>
+</body>
+</html>

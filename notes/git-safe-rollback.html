@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="用 Git revert 撤销共享分支上的一次普通提交，并检查撤销结果。">
+  <title>在共享分支上撤销一次提交 · Rookie 的笔记</title>
+  <link rel="stylesheet" href="../assets/notes.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到正文</a>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <a class="brand" href="../index.html"><span class="brand-mark" aria-hidden="true"></span><span>Rookie 的笔记</span></a>
+      <nav class="topnav" aria-label="主导航">
+        <a href="../index.html#notes">笔记</a>
+        <a href="https://github.com/rookiefyy/rookiefyy.github.io">GitHub</a>
+      </nav>
+    </div>
+  </header>
+  <main class="shell" id="main-content">
+    <article class="article">
+      <header class="article-header">
+        <div class="article-meta">
+          <span class="topic-label">开发工具</span>
+          <time datetime="2026-11-24">2026.11.24</time>
+          <span class="article-example">示例笔记</span>
+        </div>
+        <h1>在共享分支上撤销一次提交</h1>
+        <p class="article-intro">当一笔修改已经进入共享分支，可以用 <code>git revert</code> 生成一条撤销提交。原提交会留在历史里，团队仍能追溯修改和撤销的原因。</p>
+      </header>
+      <div class="article-body">
+        <h2>确认目标提交</h2>
+        <p>从共享分支的最新版本创建工作分支，确认工作区干净，再核对目标提交影响了哪些文件。这里的示例适用于只有一个父提交的普通提交。</p>
+        <pre><code>git status --short
+git show --stat 1a2b3c4
+git show 1a2b3c4</code></pre>
+        <h2>创建撤销提交</h2>
+        <p>把示例中的 <code>1a2b3c4</code> 换成确认过的提交 SHA。提交说明可以补上撤销原因，方便后来的人理解上下文。</p>
+        <pre><code>git revert 1a2b3c4</code></pre>
+        <p>后续提交改过同一处时，Git 可能提示冲突。确认这些后续改动应保留哪些，解决冲突并暂存后运行 <code>git revert --continue</code>。如果仍在处理冲突且决定取消，运行 <code>git revert --abort</code>。</p>
+        <h2>检查撤销结果</h2>
+        <p>用 <code>git show HEAD</code> 查看撤销提交，确认改动范围符合预期。运行受影响的测试，再通过团队常用的评审流程合入共享分支。</p>
+      </div>
+      <div class="article-return"><a href="../index.html#notes">返回笔记列表</a></div>
+    </article>
+  </main>
+  <footer class="site-footer">
+    <div class="shell footer-inner"><span>Rookie 的笔记</span><a href="https://github.com/rookiefyy/rookiefyy.github.io">GitHub</a></div>
+  </footer>
+</body>
+</html>

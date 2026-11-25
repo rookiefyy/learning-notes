@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="从 HTTP 状态、响应结构、业务语义和失败场景检查 API 响应。">
+  <title>一份 API 响应检查清单 · Rookie 的笔记</title>
+  <link rel="stylesheet" href="../assets/notes.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到正文</a>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <a class="brand" href="../index.html"><span class="brand-mark" aria-hidden="true"></span><span>Rookie 的笔记</span></a>
+      <nav class="topnav" aria-label="主导航">
+        <a href="../index.html#notes">笔记</a>
+        <a href="https://github.com/rookiefyy/rookiefyy.github.io">GitHub</a>
+      </nav>
+    </div>
+  </header>
+  <main class="shell" id="main-content">
+    <article class="article">
+      <header class="article-header">
+        <div class="article-meta">
+          <span class="topic-label">工程实践</span>
+          <time datetime="2026-11-20">2026.11.20</time>
+          <span class="article-example">示例笔记</span>
+        </div>
+        <h1>一份 API 响应检查清单</h1>
+        <p class="article-intro">检查响应时，从调用方的下一步出发。它能否判断这次请求的结果、读出需要的数据，并在失败时采取正确的处理方式？</p>
+      </header>
+      <div class="article-body">
+        <h2>先看状态和结构</h2>
+        <ul>
+          <li>核对 HTTP 状态码和 <code>Content-Type</code> 是否符合接口约定。</li>
+          <li>检查必填字段、字段类型，以及调用方对缺失值和 <code>null</code> 的处理。</li>
+          <li>对照契约确认返回值的单位、时间格式，以及列表的排序和分页行为。</li>
+        </ul>
+        <h2>给边界情况留一组样例</h2>
+        <p>以查询笔记列表为例。若契约规定无匹配结果时返回空数组，就用一个没有匹配项的查询，断言响应仍能按同一结构解析。</p>
+        <pre><code>{
+  "items": [],
+  "total": 0
+}</code></pre>
+        <p>再用有匹配项的查询检查数据内容，用无效的分页参数检查状态码和错误结构。如果调用方依赖稳定的错误码，也一并断言。</p>
+        <h2>记录可复核的结果</h2>
+        <p>保存请求场景、预期值和实际值，使用测试数据并省略认证信息。下次出现差异时，可以据此判断是接口契约、实现还是调用方处理发生了变化。</p>
+      </div>
+      <div class="article-return"><a href="../index.html#notes">返回笔记列表</a></div>
+    </article>
+  </main>
+  <footer class="site-footer">
+    <div class="shell footer-inner"><span>Rookie 的笔记</span><a href="https://github.com/rookiefyy/rookiefyy.github.io">GitHub</a></div>
+  </footer>
+</body>
+</html>
