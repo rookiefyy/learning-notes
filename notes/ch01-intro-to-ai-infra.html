@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="从一次生成请求追踪 AI Infra 的六层分工，复算 70B 模型的显存与解码预算，理解吞吐、延迟和硬件互联的权衡。">
+  <title>第 1 章 初识 AI Infra · Rookie 的笔记</title>
+  <link rel="stylesheet" href="../assets/notes.css">
+  <style>
+    .chapter-figure { max-width: 31rem; margin: 1.5rem auto; }
+    .chapter-figure svg { display: block; width: 100%; height: auto; }
+    .chapter-figure figcaption { color: var(--muted); font-size: 0.9rem; margin-top: 0.55rem; }
+    .chapter-table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-variant-numeric: tabular-nums; }
+    .chapter-table caption { text-align: left; font-weight: 650; }
+    .chapter-table th, .chapter-table td { border-bottom: 1px solid var(--line); padding: 0.45rem 0.3rem; text-align: start; vertical-align: top; }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到正文</a>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <a class="brand" href="../index.html"><span class="brand-mark" aria-hidden="true"></span><span>Rookie 的笔记</span></a>
+      <nav class="topnav" aria-label="主导航"><a href="../index.html#notes">笔记</a></nav>
+    </div>
+  </header>
+  <main class="shell" id="main-content">
+    <article class="article">
+      <header class="article-header">
+        <div class="article-meta">
+          <span class="topic-label">AI Infra</span>
+          <time datetime="2026-11-25">2026.11.25</time>
+        </div>
+        <h1>第 1 章 初识 AI Infra</h1>
+        <p class="article-intro">用一张 H100 让 70B 模型在 10 ms 内生成下一个 token，先该查什么？把请求拆成显存驻留、计算、数据搬移和依赖四部分，就能解释为什么权重装得下、峰值算力够高，目标延迟仍可能达不到。</p>
+      </header>
+      <div class="article-body">
+        <nav aria-label="本章目录">
+          <ol>
+            <li><a href="#why-infra">从应用请求到硬件执行</a></li>
+            <li><a href="#resource-budget">用四类数字建立资源预算</a></li>
+            <li><a href="#decode-estimate">复算一次解码</a></li>
+            <li><a href="#architecture">需求如何推动架构变化</a></li>
+          </ol>
+        </nav>
+
+        <section aria-labelledby="why-infra">
+          <h2 id="why-infra">1.1 从应用请求到硬件执行</h2>
+          <p>AI Infra 覆盖训练与推理所用的计算、存储、互联及其软件。训练用数据更新模型参数，推理使用已得到的参数处理输入。以检索问答为例，应用代码负责检索、权限与工具执行，模型根据本次上下文（context）生成结果或提出工具调用。上下文改变时，模型参数可以保持原样，输入长度、生成步数和状态占用却都会变化。</p>
+          <table class="chapter-table">
+            <caption>六层分工与排查问题</caption>
+            <thead><tr><th scope="col">层</th><th scope="col">优先问什么</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">应用与任务</th><td>用户什么时候要首个结果？完整请求有何时限和成本预算？</td></tr>
+              <tr><th scope="row">模型与负载</th><td>模型规定哪些计算和数据依赖？输入多长、输出多长、请求如何到达？</td></tr>
+              <tr><th scope="row">训练与推理系统</th><td>如何路由、组批、分配及回收状态？训练又怎样同步、更新和恢复？</td></tr>
+              <tr><th scope="row">算子、编译与运行时</th><td>怎样分块、融合和提交算子？哪些中间值要写回外部存储？</td></tr>
+              <tr><th scope="row">处理器与存储</th><td>每个设备要算多少、读写多少、同时放下多少？</td></tr>
+              <tr><th scope="row">互联与数据中心</th><td>数据跨越哪些设备和网络？谁在等待？部署还受哪些电力和散热约束？</td></tr>
+            </tbody>
+          </table>
+          <p>容量和时延也会反向约束上层。例如，较长的输入会增加 prefill 工作和 KV 驻留；加速器内存不足时，需要缩小批次、压缩状态或改变模型分工。资源调度和观测往往跨越多层。</p>
+
+          <h3>普通自回归生成的职责与依赖</h3>
+          <p>路由器选择能提供目标模型的实例，实例内部的调度器决定哪些请求参加本轮计算。文本由分词器变成 token 序列。预填充（prefill）处理已给出的序列并构建 KV 缓存，常见生成路径可用最后一个输入位置的 logits 得到首个输出 token。解码（decode）再用已选 token 和历史状态逐步生成后续输出。KV 缓存保存已处理位置的注意力键和值，实例把输出经服务连接流式送回。分词位置、路由策略以及 prefill 与 decode 的放置都由具体部署决定。</p>
+          <figure class="chapter-figure">
+            <svg viewBox="0 0 400 388" role="img" aria-labelledby="request-title request-desc">
+              <title id="request-title">一次生成请求的逻辑执行顺序</title>
+              <desc id="request-desc">应用提交请求，路由器选实例，实例调度器组批。Prefill 建立 KV 并可产生首个 token；decode 消费上一输出并读取已有 KV。实线表示执行依赖，不表示物理传输。</desc>
+              <defs>
+                <marker id="request-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#475569"/></marker>
+              </defs>
+              <rect x="6" y="6" width="388" height="376" rx="18" fill="#f6f9fc" stroke="#dbe5ef"/>
+              <g stroke="#475569" stroke-width="2" marker-end="url(#request-arrow)">
+                <path d="M200 64 V86"/><path d="M200 122 V144"/><path d="M200 188 V210"/><path d="M200 254 V276"/>
+              </g>
+              <g fill="#fff" stroke="#99acc0">
+                <rect x="61" y="27" width="278" height="37" rx="8"/>
+                <rect x="61" y="86" width="278" height="36" rx="8"/>
+                <rect x="61" y="144" width="278" height="44" rx="8"/>
+              </g>
+              <g fill="#e5f1ee" stroke="#7eaa9c">
+                <rect x="61" y="210" width="278" height="44" rx="8"/>
+                <rect x="61" y="276" width="278" height="58" rx="8"/>
+              </g>
+              <g fill="#172b3c" font-family="system-ui, sans-serif" font-size="16" text-anchor="middle">
+                <text x="200" y="51">应用提交上下文</text>
+                <text x="200" y="109">服务路由器选择推理实例</text>
+                <text x="200" y="171">实例调度器选择本轮请求</text>
+                <text x="200" y="237">Prefill · 建立 KV，可生成首 token</text>
+                <text x="200" y="300">Decode · 读取历史 KV</text>
+                <text x="200" y="322">上一步输出成为下一步输入</text>
+                <text x="200" y="361" font-size="14">箭头表示逻辑执行依赖</text>
+              </g>
+            </svg>
+            <figcaption>图 1。执行职责与数据依赖示意。图中省略了设备、通信路径和调度队列，各步间距也不代表用时。<a href="#ref-book">[1]</a></figcaption>
+          </figure>
+          <p>沿这条路径区分四类数据动作：实例启动或换模时，把模型加载到设备；每步计算时，按算子需求把权重从显存送向计算单元；生成期间，为请求追加并复用 KV；分片部署时，按依赖跨卡交换中间结果。输出从 100 增至 1000 token，驻留的权重可以仍是一份，解码执行和 KV 增长却会继续。复制完整实例通常要为副本另备权重和状态预算，路由则决定请求去哪个实例。</p>
+          <p>CPU 主存、加速器显存和片上缓冲处于不同层级。高带宽内存（HBM）提高芯片取数速率，分块与复用减少远处读写，双缓冲可在条件允许时让下一块的搬移与当前块计算重叠。多卡紧密协作通常走纵向扩展（scale-up）互联，跨组扩容通常依赖横向扩展（scale-out）网络。例如 GB200 NVL72 把 72 个 GPU 组织进同一个机柜级 NVLink 域，其他集群流量仍有独立路径。<a href="#ref-nvl">[3]</a></p>
+          <p>原书还以 DeepSeek V4 和 V4.1 Flash 串联后续章节。V4 的上下文压缩和稀疏访问改变了待保存与读取的数据。书中所述 V4.1 Flash 进一步以因果编码器—解码器区分输入与输出路径，大量输入 token 可以避开解码器主体。这里的单卡算例采用普通稠密解码近似，模型结构细节留到第 2 章。<a href="#ref-book">[1]</a></p>
+        </section>
+
+        <section aria-labelledby="resource-budget">
+          <h2 id="resource-budget">1.2 用四类数字建立资源预算</h2>
+          <table class="chapter-table">
+            <caption>资源量与时间量</caption>
+            <thead><tr><th scope="col">量</th><th scope="col">工程读法</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">容量</th><td>同一时刻驻留的 <var>M</var> bytes 要满足 <var>M</var> ≤ <var>M</var><sub>cap</sub>。</td></tr>
+              <tr><th scope="row">算力</th><td><var>F</var> 是 FLOP 次数，<var>Π</var> 是 FLOP/s，计算下界为 <var>F</var> / <var>Π</var>。乘法和加法各计一次。</td></tr>
+              <tr><th scope="row">带宽</th><td><var>R</var> 是经过某一接口的字节数，<var>β</var> 是该接口的 bytes/s，搬移下界为 <var>R</var> / <var>β</var>。</td></tr>
+              <tr><th scope="row">操作延迟</th><td>小消息的启动、往返以及串行依赖都可能主导。单条独占路径可先用 <var>α</var> + <var>R</var> / <var>β</var> 粗估，排队另计。</td></tr>
+            </tbody>
+          </table>
+          <p>一份权重可以驻留一次、执行中反复读取，所以容量 <var>M</var> 和流量 <var>R</var> 要分开记。标称吞吐也要匹配实际输入精度、累加精度和稠密或稀疏条件。</p>
+          <p>先看数量级，再决定优化对象。原书用 2009 年的延迟数据说明，主存访问约 100 ns，机房内往返可达 0.5 ms，机械盘寻道约 10 ms。这些历史量级只用于读懂尺度。若一次任务假设有 1 ms CPU 计算和 20 次串行的 10 ms 寻道，CPU 翻倍只省 0.5 ms，减少一半寻道则省 100 ms。按 Amdahl 定律，原耗时占比 <var>f</var> 的部分加速 <var>s</var> 倍，整体加速为 <code>1 / ((1 − f) + f / s)</code>，前提是工作量及其他部分耗时保持不变。<a href="#ref-book">[1]</a> <a href="#ref-amdahl">[4]</a></p>
+
+          <h3>从参数个数算到逐卡容量</h3>
+          <p>容量统一用 bytes 换算。<code>1 GB = 10⁹ bytes</code>，<code>1 GiB = 2³⁰ bytes</code>，<code>1 byte = 8 bit</code>。400 Gbit/s ÷ 8 = 50 GB/s，送 1 GB 的线速下界为 20 ms。协议、启动、竞争和传输方向会影响应用实际吞吐。</p>
+          <p>DeepSeek-R1-Distill-Llama-70B 的权重索引记录约 141.11 GB（131.42 GiB）的 BF16 张量，约 705.54 亿个参数各占 2 bytes。名义 80 GB 的 H100 SXM 单卡装不下，等分两卡则约 70.55 GB/卡。原书的 8 bit 分组量化方案含每组 128 个权重共用的 2-byte scale，并保留部分 BF16 参数，合计约 73.73 GB。该数对应指定格式。<a href="#ref-book">[1]</a> <a href="#ref-h100">[2]</a> <a href="#ref-weights">[6]</a></p>
+          <p><strong>逐卡检查。</strong>将权重、状态和工作区相加，再和具体设备上的可用空间比较。原书取 8192-token 单请求的 BF16 KV 为 2.5 GiB，工作区预留 2 GiB，量化后的总预算为 73.73 + 2.68 + 2.15 ≈ 78.56 GB，离名义容量约 1.44 GB。额外框架占用、碎片、上下文增长和并发都可能吃掉余量。按练习 1-2 每卡固定预留 5 GB 时，单张 H100 的 75 GB 权重额度够装量化权重。两张 H100 均分时，每卡 70.55 GB 的 BF16 权重也在额度内。48 GB 与 80 GB 的异构组合只余 43 + 75 = 118 GB，装不下 BF16 权重。量化方案可按 30 GB 和 43.73 GB 分配，运行时是否支持该切分还要另外检查。</p>
+        </section>
+
+        <section aria-labelledby="decode-estimate">
+          <h2 id="decode-estimate">1.3 复算一次解码</h2>
+          <p>沿用原书的教学模型。取 <var>N</var> = 70 × 10⁹ 个参数，每参数读取 1 byte；主要权重每批读一遍，忽略量化附加读写、注意力状态、采样和启动。批中 <var>B</var> 条请求各前进一步，主要矩阵乘加约为 <var>F</var> = 2<var>BN</var> FLOP，权重流量 <var>R</var><sub>W</sub> ≈ 70 GB。这里的 70 GB 是读流量近似，容量预算仍使用上节的 73.73 GB。</p>
+          <p>用 H100 SXM 的 3.35 TB/s HBM 带宽和约 989.4 TFLOP/s 稠密 BF16 矩阵峰值。单请求的纯计算下界为 140 GFLOP ÷ 989.4 TFLOP/s ≈ 0.1415 ms；权重读取下界为 70 GB ÷ 3350 GB/s ≈ 20.90 ms，相差约 148 倍。取两项最大值 <code>T_lower = max(F / Π, R_W / β)</code> 得到这两项的共同下界，充分重叠时才有机会接近它。若必须先读完再算，两项耗时还要相加。<a href="#ref-book">[1]</a> <a href="#ref-h100">[2]</a></p>
+          <table class="chapter-table">
+            <caption>相同题设下的下界与理想吞吐</caption>
+            <thead><tr><th scope="col">改动</th><th scope="col">整批下界（ms）</th><th scope="col">吞吐上界（token/s）</th></tr></thead>
+            <tbody>
+              <tr><th scope="row"><var>B</var> = 1</th><td>20.90</td><td>47.86</td></tr>
+              <tr><th scope="row">两倍算力，<var>B</var> = 1</th><td>20.90</td><td>47.86</td></tr>
+              <tr><th scope="row">两倍带宽，<var>B</var> = 1</th><td>10.45</td><td>95.71</td></tr>
+              <tr><th scope="row"><var>B</var> = 8，权重共读</th><td>20.90</td><td>382.86</td></tr>
+            </tbody>
+          </table>
+          <p>要让 70 GB 的纯读耗时 ≤ 10 ms，至少需要 7 TB/s 有效带宽。<var>B</var> = 8 时，20.90 ÷ 8 ≈ 2.61 ms/token 是给吞吐用的分摊量，单个请求仍经历整批执行并可能排队。八条请求的状态也要分别核算，例如上节每条 2.5 GiB 的条件无法支持该卡上的八条同类请求。</p>
+
+          <figure class="chapter-figure">
+            <svg viewBox="0 0 400 250" role="img" aria-labelledby="budget-title budget-desc">
+              <title id="budget-title">权重读取与矩阵计算的时间下界在约 148 请求处相交</title>
+              <desc id="budget-desc">横轴为每批请求数，纵轴为毫秒。权重读取固定在 20.90 毫秒，矩阵计算从零按每请求 0.1415 毫秒上升。整批下界取两者较大值。</desc>
+              <rect x="6" y="6" width="388" height="238" rx="16" fill="#f6f9fc" stroke="#dbe5ef"/>
+              <g fill="none" stroke="#aebed0" stroke-width="1">
+                <path d="M52 31 V192 H364"/>
+                <path d="M52 49 H364 M52 97 H364 M52 144 H364" stroke-dasharray="3 4"/>
+              </g>
+              <path d="M52 92.5 H354" stroke="#17635b" stroke-width="3"/>
+              <path d="M52 192 L354 41.1" stroke="#8d4409" stroke-width="3" stroke-dasharray="6 4"/>
+              <path d="M251.1 92.5 V192" stroke="#64748b" stroke-width="1.5" stroke-dasharray="3 4"/>
+              <circle cx="251.1" cy="92.5" r="4.5" fill="#26374a"/>
+              <g fill="#26374a" font-family="system-ui, sans-serif" font-size="13">
+                <text x="18" y="27">ms</text>
+                <text x="24" y="53">30</text>
+                <text x="24" y="101">20</text>
+                <text x="24" y="148">10</text>
+                <text x="31" y="196">0</text>
+                <text x="49" y="211">0</text>
+                <text x="238" y="211">148</text>
+                <text x="335" y="211">224</text>
+                <text x="280" y="229">每批请求数</text>
+                <text x="70" y="82" fill="#17635b">权重读取 · 20.90 ms</text>
+                <text x="261" y="49" fill="#8d4409">矩阵计算</text>
+              </g>
+            </svg>
+            <figcaption>图 2。按本节输入绘制。横轴是本步参与计算的请求数，每条请求处理一个 token。容量、调度和额外访存可能先限制可运行批次。<a href="#ref-roofline">[5]</a></figcaption>
+          </figure>
+          <p>令两项相等得到 <var>B</var>* = <var>b</var><sub>W</sub><var>Π</var>/(2<var>β</var>) ≈ 147.7。等价地，主要权重的算术强度 <code>I = F / R_W = 2B / b_W</code>，单位为 FLOP/byte。越过 <var>Π</var>/<var>β</var> 才由这两项中的计算项主导。在练习 1-3 的 70% 带宽、50% 算力条件下，原读取量和减半后的纯读下界分别为 29.85 ms、14.93 ms；在 <var>B</var> 为 1、16、64 的六个组合中，单步 10 ms 均可排除。此类下界适合排除方案，实测和容量检查决定能否部署。<a href="#ref-book">[1]</a> <a href="#ref-roofline">[5]</a></p>
+
+          <h3>用实测区分统计口径与漏项</h3>
+          <p>原书实验使用 Qwen3-8B、BF16、RTX PRO 6000 Blackwell Workstation Edition、vLLM 0.23.0 eager 模式，输入 2048 token、输出 256 token，各档三次取中位数。整批吞吐的分母覆盖 prefill；每输出 token 时间（TPOT）使用客户端首末输出事件之间的 255 个间隔，先在批内再在三次测量间取中位数。表中是提交并发，不能据此断定每个实际调度轮次都满批。<a href="#ref-book">[1]</a></p>
+          <table class="chapter-table">
+            <caption>原书 §1.3.3 测量摘要，本笔记未重新跑 GPU</caption>
+            <thead><tr><th scope="col">并发请求</th><th scope="col">整批输出（token/s）</th><th scope="col">客户端 TPOT（ms）</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">1</th><td>37.31</td><td>26.53</td></tr>
+              <tr><th scope="row">4</th><td>141.73</td><td>26.97</td></tr>
+              <tr><th scope="row">16</th><td>479.33</td><td>29.30</td></tr>
+              <tr><th scope="row">64</th><td>1164.94</td><td>40.48</td></tr>
+            </tbody>
+          </table>
+          <p>从 1 到 64 并发，吞吐约为 31.2 倍，客户端 TPOT 约增 52.6%。权重复用提高总产出，同时新增的请求会增加上下文访问与计算。完整服务还需看首 token 延迟（TTFT）、端到端延迟和排队。设计复测时，可固定模型、精度、并发、输出长度和计时边界，只改输入长度，同时采客户端与 GPU 侧时间，避免把输入处理变长归给 decode。</p>
+          <p>用原书速查数字看漏项。Qwen3-8B 完整 BF16 权重约 16.38 GB，每个上下文 token 的 KV 为 144 KiB，2048 token 得 288 MiB。单步 decode 的主要权重读约 15.14 GB，完整嵌入表虽驻留，输入 token 通常只查一行。加约 0.302 GB 旧 KV，在 1.792 TB/s 下得 8.62 ms。原书同一设置下的 2048-token prefill 矩阵计算约 29.69 TFLOP，而 decode 一步约 16.34 GFLOP。这解释了两阶段工作量侧重点，但不单独决定实现瓶颈。<a href="#ref-book">[1]</a> <a href="#ref-qwen">[7]</a></p>
+          <p>报告模型 FLOP 利用率（MFU）或内存带宽利用率（MBU）时，分别使用 <code>F / (ΠT)</code> 和 <code>R / (βT)</code>，分子与测得的 <var>T</var> 应对应同一工作与时间区间。用固定上下文一步的 8.62 ms 除以客户端约 26.5 ms，只能粗估差距。作者补测的 12.1 ms 客户端 TPOT 同时改变了逐步观测、前缀缓存和输入构造；约 10.7 ms 的 GPU 事件仅覆盖该轮模型执行。证据提示要查主机观测与提交开销、状态读写和其他算子，也提示不能把全部差值归因于日志。<a href="#ref-followup">[8]</a></p>
+        </section>
+
+        <section aria-labelledby="architecture">
+          <h2 id="architecture">1.4 需求如何推动架构变化</h2>
+          <ol>
+            <li><strong>TPU：计算需求增长改变设备选择。</strong> Google 的历史预测是，日均三分钟语音搜索若走既有路线，可能需要数据中心规模翻倍。TPU v1 用专用矩阵阵列和片上缓冲提高推理的成本效率。判断是否值得专用化，要把请求量、每请求计算量、能耗和前期投入放到同一账里。<a href="#ref-tpu">[9]</a></li>
+            <li><strong>SmartNIC：包速率增长改变主机分工。</strong> 40 Gbit/s 链路在 84 bytes 最小帧线时假设下约为 5952 万包/s。按单核 1000–2000 万包/s 的简单转发假设，约需 3–6 核。Azure 的 FPGA SmartNIC 将重复的数据面规则放到网卡，主机仍管理策略。核数是简化预算，公开论文验证的是具体 Azure 方案。<a href="#ref-book">[1]</a> <a href="#ref-smartnic">[10]</a></li>
+            <li><strong>Unified Bus：单设备容量不足改变协作路径。</strong> 原书用华为 UB 说明如何降低远端资源访问的部分软件层开销。多卡新增的显存和算力只有在数据可及时到达时才有用。估算时应按分片核算每卡驻留量，再核对传输量、拓扑和同步依赖。带宽聚合也要核对链路方向与竞争情况。<a href="#ref-book">[1]</a></li>
+          </ol>
+          <p>架构变化会把瓶颈移到下一层。低位宽权重降低驻留与搬移量，也可能带来转换开销；扩大批次提高权重复用，也增加 KV 与排队压力；增加设备扩大资源池，也带来同步、故障和尾延迟。拿到新任务后，按<strong>逐设备判断放得下 → 分接口估算搬移与计算 → 沿依赖分析等待 → 用同口径实测校验</strong>的顺序重算。</p>
+          <p>后续阅读路线：原书第 2、3 章从模型尺寸和负载推导 <var>F</var>、<var>R</var> 与 KV；第 4、5 章深入加速器与算子；第 6、7 章追踪卡间与集群数据路径；第 8、9 章比较推理调度及状态放置；第 10–12 章将同一方法用于训练、资源调度及端边云。</p>
+        </section>
+
+        <section aria-labelledby="sources">
+          <h2 id="sources">资料与精读入口</h2>
+          <ol>
+            <li id="ref-book">李博杰，《深入理解 AI Infra：量化分析与系统设计》v1.0（2026-10-01）。第 1 章 §1.1–§1.4，书内第 1–22 页、PDF 物理第 11–32 页。<a href="https://github.com/bojieli/ai-infra-book">作者配套仓库</a>。</li>
+            <li id="ref-h100">NVIDIA，H100 GPU 产品规格，SXM 的容量、带宽和矩阵峰值。产品表标星峰值采用稀疏条件，本文沿用原书的稠密 BF16 口径。<a href="https://www.nvidia.com/en-us/data-center/h100/#specifications">H100 规格</a>。</li>
+            <li id="ref-nvl">NVIDIA，GB200 NVL72，机柜内 NVLink 域说明。<a href="https://www.nvidia.com/en-us/data-center/gb200-nvl72/">GB200 NVL72 产品页</a>。</li>
+            <li id="ref-amdahl">Gene M. Amdahl，<cite>Validity of the Single Processor Approach to Achieving Large Scale Computing Capabilities</cite>，AFIPS 1967，DOI 10.1145/1465482.1465560。<a href="https://www.cs.cmu.edu/~18742/papers/Amdahl1967.pdf">原文扫描件</a>。</li>
+            <li id="ref-roofline">Samuel Williams、Andrew Waterman、David Patterson，<cite>Roofline: An Insightful Visual Performance Model for Multicore Architectures</cite>，CACM 2009，DOI 10.1145/1498765.1498785。可对照算术强度与带宽斜线。<a href="https://www2.eecs.berkeley.edu/Pubs/TechRpts/2008/EECS-2008-134.html">作者技术报告</a>。</li>
+            <li id="ref-weights">DeepSeek，R1-Distill-Llama-70B 权重索引，见 <code>metadata.total_size</code>。<a href="https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-70B/blob/main/model.safetensors.index.json">官方权重索引</a>。</li>
+            <li id="ref-qwen">Qwen，Qwen3-8B 配置，36 层、8 个 KV 头、头维度 128。以 BF16 K/V 计算，<code>2 × 36 × 8 × 128 × 2 bytes = 144 KiB/token</code>。<a href="https://huggingface.co/Qwen/Qwen3-8B/blob/21073ac5a57f8ac6b159dae129728af51ac707e8/config.json">固定版本配置</a>。</li>
+            <li id="ref-followup">作者配套实验 1-4，固定修订的补测条件、客户端事件和 GPU 审计结果。<a href="https://raw.githubusercontent.com/bojieli/ai-infra-book/3bdcb4fcab73010eeaccf31cc10a8242a895d82e/experiments/ch01/01-04/FOLLOWUP.md">补测记录</a>。</li>
+            <li id="ref-tpu">Norman P. Jouppi 等，<cite>In-Datacenter Performance Analysis of a Tensor Processing Unit</cite>，ISCA 2017，arXiv:1704.04760。重点读 §2 的需求起点及矩阵阵列设计。<a href="https://arxiv.org/pdf/1704.04760">TPU 原论文</a>。</li>
+            <li id="ref-smartnic">Daniel Firestone 等，<cite>Azure Accelerated Networking: SmartNICs in the Public Cloud</cite>，NSDI 2018。重点读部署背景与软硬件分工。<a href="https://www.usenix.org/conference/nsdi18/presentation/firestone">USENIX 论文页</a>。</li>
+          </ol>
+        </section>
+      </div>
+      <div class="article-return"><a href="../index.html#notes">返回笔记列表</a></div>
+    </article>
+  </main>
+</body>
+</html>
